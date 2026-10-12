@@ -827,7 +827,7 @@ fn pen_mask_undoes_step_by_step_and_double_click_moves_the_whole_mask() {
 }
 
 /// Holding I (or S / L / D) while the Pen closes a mask on its first vertex sets its mode
-/// (Intersect), and the key's shortcut (Go to Layer In Point) doesn't move the time meanwhile.
+/// (Intersect). As in After Effects, the key's own shortcut (Go to Layer In Point) still runs.
 #[test]
 fn pen_closes_a_mask_with_the_held_keys_mode() {
     use effectcraft_engine::project::{GroupKind, MaskMode};
@@ -862,7 +862,7 @@ fn pen_closes_a_mask_with_the_held_keys_mode() {
         k => panic!("not a mask: {k:?}"),
     };
     assert_eq!(mode, MaskMode::Intersect);
-    assert_eq!(h.state().session.time(), t0, "I didn't go to the layer's In point");
+    assert_ne!(h.state().session.time(), t0, "I still goes to the layer's In point, as in After Effects");
 }
 
 /// #513: clicking away from a mask's path, even on its own layer, deselects the mask's points;

@@ -212,12 +212,6 @@ fn held_mask_mode(ctx: &egui::Context) -> Option<&'static str> {
     ctx.input(|i| MASK_MODE_KEYS.iter().find(|(k, _)| i.key_down(*k)).map(|(_, m)| *m))
 }
 
-/// A Pen path is being drawn in the viewer: the plain [`MASK_MODE_KEYS`] pick the mask mode
-/// then, so their shortcuts (Go to Layer In Point, Reveal Scale / Audio Levels) don't run.
-pub(crate) fn drawing_pen_path(app: &EffectcraftApp, ctx: &egui::Context) -> bool {
-    app.ui.tool == Tool::Pen && ctx.data(|d| d.get_temp::<(LayerId, u64)>(pen_id()).is_some())
-}
-
 use super::viewer_overlays::{self as ov, VertexHit};
 use super::viewer_tools as vt;
 

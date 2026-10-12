@@ -1812,12 +1812,6 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
             let _ = invoke(app, ctx, "edit.clear", json!({}));
             continue;
         }
-        // While the Pen draws a path in the viewer, S / I / L / D held pick the mask's mode
-        // (Subtract, Intersect, Lighten, Darken) as it closes: their shortcuts (Reveal Scale, Go
-        // to Layer In Point, Reveal Audio Levels) don't run, so the time can't move under the Pen.
-        if !mods.any() && crate::panels::viewer::MASK_MODE_KEYS.iter().any(|(k, _)| *k == key) && crate::panels::viewer::drawing_pen_path(app, ctx) {
-            continue;
-        }
         if let Some((_, _, id, params)) = binds.iter().find(|(m, k, ..)| *k == key && mods_match(*m, mods)) {
             let (id, params) = (id.clone(), if params.is_null() { json!({}) } else { params.clone() });
             if id == "edit.paste"
