@@ -198,6 +198,13 @@ entries with bound parameters and the frontend's tool / panel commands), and a p
   overlapping scope are listed before you assign.
 - **Scope.** Menu and engine commands are application-wide; timeline commands work in the
   Timeline and viewer commands in the Composition panel.
+- **Several default keys.** A command can have more than one default key; the menus show the
+  first. As in After Effects, Next / Previous Frame are `PageDown` / `PageUp` and
+  `Cmd+Right` / `Cmd+Left` Arrow (`Ctrl` on Windows and Linux), Forward / Back 10 Frames add
+  `Shift` (`time.nextFrame`, `time.previousFrame`, `time.forward10`, `time.back10`; `time.step
+  {frames}` for any count). They stop at the comp's first and last frames, leave the time alone
+  while a text field or text layer is being edited (there they move the caret), and don't touch
+  `Alt+Right` / `Alt+Left` (Move Keyframes 1 Frame Later / Earlier).
 
 Commands: `shortcuts.list {query?, keys?, assigned?}`, `shortcuts.set {command, params?, keys}`,
 `shortcuts.reset {command?}`, `shortcuts.preset {op: select|new|duplicate|delete|rename, name?,

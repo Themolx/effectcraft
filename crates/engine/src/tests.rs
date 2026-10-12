@@ -395,6 +395,44 @@ fn time_navigation() {
     assert_eq!(s.execute("time.step", json!({"frames": 5})).unwrap()["frame"], 50);
 }
 
+/// Next / Previous Frame (Page keys, Cmd+Arrow) and Forward / Back 10 Frames (Shift) step from
+/// the current frame and stop at the comp's first and last frames.
+#[test]
+fn frame_steps_clamp_to_the_comp() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Steps", "width": 64, "height": 36, "frameRate": 30.0, "duration": 1.0})).unwrap();
+    let frame = |s: &mut Session, id: &str| s.execute(id, json!({})).unwrap()["frame"].as_i64().unwrap();
+    assert_eq!(frame(&mut s, "time.nextFrame"), 1);
+    assert_eq!(frame(&mut s, "time.forward10"), 11);
+    assert_eq!(frame(&mut s, "time.previousFrame"), 10);
+    assert_eq!(frame(&mut s, "time.back10"), 0);
+    // At the start: stays on frame 0.
+    assert_eq!(frame(&mut s, "time.previousFrame"), 0);
+    assert_eq!(frame(&mut s, "time.back10"), 0);
+    // Near the end (30 frames: last is 29) ten frames stop on the last frame.
+    s.execute("time.set", json!({"frame": 25})).unwrap();
+    assert_eq!(frame(&mut s, "time.forward10"), 29);
+    assert_eq!(frame(&mut s, "time.nextFrame"), 29);
+    assert_eq!(frame(&mut s, "time.back10"), 19);
+    // Hostile step sizes clamp instead of overflowing.
+    assert_eq!(s.execute("time.step", json!({"frames": i64::MAX})).unwrap()["frame"], 29);
+    assert_eq!(s.execute("time.step", json!({"frames": i64::MIN})).unwrap()["frame"], 0);
+}
+
+/// A comp shorter than a frame (only possible from a file) must not panic when the time moves.
+#[test]
+fn frame_steps_in_a_zero_length_comp() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Empty", "width": 64, "height": 36, "frameRate": 30.0, "duration": 1.0})).unwrap();
+    let cid = s.state.active_comp.unwrap();
+    let mut p = (*s.project).clone();
+    p.comp_mut(cid).unwrap().duration = effectcraft_time::Tick::ZERO;
+    s.project = std::sync::Arc::new(p);
+    for id in ["time.nextFrame", "time.forward10", "time.previousFrame", "time.back10"] {
+        assert_eq!(s.execute(id, json!({})).unwrap()["frame"], 0, "{id}");
+    }
+}
+
 #[test]
 fn time_navigation_per_property() {
     let mut s = demo();

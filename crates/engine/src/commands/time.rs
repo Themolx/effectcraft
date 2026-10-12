@@ -81,7 +81,9 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
 fn step(s: &mut Session, p: &Value) -> Result<Value> {
     let n = p.get("frames").and_then(Value::as_i64).unwrap_or(1);
     let comp = s.active_comp().ok_or(EngineError::NoComp)?;
-    let f = comp.frame_rate.frame_at(s.time()) + n;
+    // `frames` comes from agents and scripts: a huge step lands on the first / last frame
+    // (set_time clamps to the comp) instead of overflowing.
+    let f = comp.frame_rate.frame_at(s.time()).saturating_add(n);
     let t = comp.frame_rate.tick_of(f);
     s.set_time(t);
     Ok(report(s))
