@@ -1494,12 +1494,19 @@ pub fn viewer_hook(
                 if !picking && app.ui.viewer.show_layer_controls && matches!(&g.kind, GroupKind::Effect { effect } if effect == super::fx_editors::RESHAPE) {
                     super::fx_editors::reshape_overlay(app, ui, painter, map, ectx, layer, g, &m, &mut actions);
                 }
-                if !picking && app.ui.viewer.show_layer_controls && matches!(&g.kind, GroupKind::Effect { effect } if effect == super::fx_editors::MESH_WARP) {
+                let mesh_overlay =
+                    !picking && app.ui.viewer.show_layer_controls && matches!(&g.kind, GroupKind::Effect { effect } if effect == super::fx_editors::MESH_WARP);
+                if mesh_overlay {
                     super::fx_editors::mesh_warp_overlay(app, ui, painter, map, ectx, layer, g, &fm, &mut actions);
                 }
                 let scope = FxScope { effect: &g.match_id, root: g, path: String::new() };
                 let mut pts = Vec::new();
                 visible_points(g, &scope, layer, ectx, 0, &mut pts);
+                // Mesh Warp's region corners have their own handles (just outside the box, clear
+                // of the mesh's corner vertices).
+                if mesh_overlay {
+                    pts.retain(|pr| !matches!(pr.match_id.as_str(), "regionTopLeft" | "regionBottomRight"));
+                }
                 // An explicit pick stays visible even when View > Show Layer Controls is off.
                 if !app.ui.viewer.show_layer_controls {
                     pts.retain(|pr| picked_prop == Some(pr.uid));

@@ -12,8 +12,9 @@
 //!   and destination mask outlines with draggable correspondence handles ([`reshape_overlay`]);
 //! - EXtractoR: a Layer popup of the footage's OpenEXR layers, and Red / Green / Blue / Alpha
 //!   popups of its channels ([`channel_popup`]);
-//! - Mesh Warp: on the Composition viewer, the distortion mesh's grid over the layer with a
-//!   draggable handle on every vertex ([`mesh_warp_overlay`], #303).
+//! - Mesh Warp: on the Composition viewer, the distortion mesh's grid over its region (the whole
+//!   layer by default) with a draggable handle on every vertex, and the region's box with
+//!   corner, edge and move handles ([`mesh_warp_overlay`], #303).
 //!
 //! Every edit is a `prop.set` engine command (undoable; one drag = one undo step) and every
 //! handle registers an automation id.
@@ -1044,10 +1045,60 @@ fn format_mesh(offs: &[(f64, f64)]) -> String {
     offs.iter().map(|o| format!("{},{}", r(o.0), r(o.1))).collect::<Vec<_>>().join(" ")
 }
 
-/// Mesh Warp on the Composition viewer (#303): the distortion mesh's grid over the layer, with
-/// a handle on every vertex. Dragging a vertex moves it (its offset in the hidden `mesh`
-/// parameter; the first drag of an undistorted mesh writes the whole grid). `fm` maps effect
-/// space to comp.
+/// Mesh Warp's region (`[x0, y0, x1, y1]`, layer pixels), normalised as it renders; `None` when
+/// the instance has no region parameters.
+fn mesh_region(layer: &Layer, ectx: &EvalCtx, g: &PropGroup, size: [f64; 2]) -> Option<[f64; 4]> {
+    let corner = |id: &str| g.get(id).map(|p| ectx.value(layer, p).as_vec2());
+    let (tl, br) = (corner("regionTopLeft")?, corner("regionBottomRight")?);
+    Some(effectcraft_engine::effects::mesh_region(Some(tl), Some(br), size))
+}
+
+/// The region handles: automation suffix, label, and which sides of `[x0, y0, x1, y1]` a drag
+/// moves (`move` moves them all).
+const MESH_REGION_HANDLES: [(&str, &str, [bool; 4]); 9] = [
+    ("tl", "Region top-left corner", [true, true, false, false]),
+    ("tr", "Region top-right corner", [false, true, true, false]),
+    ("br", "Region bottom-right corner", [false, false, true, true]),
+    ("bl", "Region bottom-left corner", [true, false, false, true]),
+    ("top", "Region top edge", [false, true, false, false]),
+    ("right", "Region right edge", [false, false, true, false]),
+    ("bottom", "Region bottom edge", [false, false, false, true]),
+    ("left", "Region left edge", [true, false, false, false]),
+    ("move", "Move region", [true, true, true, true]),
+];
+
+/// The region `r` with the sides in `sides` moved by `d` (layer pixels), kept at least 1 px wide
+/// and tall.
+fn moved_region(r: [f64; 4], sides: [bool; 4], d: [f64; 2]) -> [f64; 4] {
+    let [mut x0, mut y0, mut x1, mut y1] = r;
+    if !(d[0].is_finite() && d[1].is_finite()) {
+        return r;
+    }
+    if sides.iter().all(|s| *s) {
+        return [x0 + d[0], y0 + d[1], x1 + d[0], y1 + d[1]];
+    }
+    if sides[0] {
+        x0 = (x0 + d[0]).min(x1 - 1.0);
+    }
+    if sides[1] {
+        y0 = (y0 + d[1]).min(y1 - 1.0);
+    }
+    if sides[2] {
+        x1 = (x1 + d[0]).max(x0 + 1.0);
+    }
+    if sides[3] {
+        y1 = (y1 + d[1]).max(y0 + 1.0);
+    }
+    [x0, y0, x1, y1]
+}
+
+/// Mesh Warp on the Composition viewer (#303): the distortion mesh's grid over its region (the
+/// whole layer by default), with a handle on every vertex. Dragging a vertex moves it (its
+/// offset in the hidden `mesh` parameter; the first drag of an undistorted mesh writes the
+/// whole grid). The region (an extension modelled on Nuke's GridWarp) is a dashed box with
+/// handles just outside its corners and edges and a move handle above it; dragging them
+/// redraws the box (`regionTopLeft` / `regionBottomRight`), and the rest grid, with the
+/// vertex offsets relative to it, follows. `fm` maps effect space to comp.
 #[allow(clippy::too_many_arguments)]
 pub fn mesh_warp_overlay(
     app: &mut EffectcraftApp,
@@ -1062,13 +1113,17 @@ pub fn mesh_warp_overlay(
 ) {
     let (rows, cols, offs) = mesh_grid(layer, ectx, g);
     let [lw, lh] = ectx.effect_bounds(layer).0;
-    let rest = |k: usize| [(k % (cols + 1)) as f64 / cols as f64 * lw, (k / (cols + 1)) as f64 / rows as f64 * lh];
+    let region = mesh_region(layer, ectx, g, [lw, lh]);
+    let [x0, y0, x1, y1] = region.unwrap_or([0.0, 0.0, lw, lh]);
+    let (rw, rh) = (x1 - x0, y1 - y0);
+    let rest = |k: usize| [x0 + (k % (cols + 1)) as f64 / cols as f64 * rw, y0 + (k / (cols + 1)) as f64 / rows as f64 * rh];
+    let to_screen = |q: [f64; 2]| map.to_screen(fw::layer_to_comp(fm, q));
     let screen: Vec<Pos2> = offs
         .iter()
         .enumerate()
         .map(|(k, o)| {
             let r = rest(k);
-            map.to_screen(fw::layer_to_comp(fm, [r[0] + o.0, r[1] + o.1]))
+            to_screen([r[0] + o.0, r[1] + o.1])
         })
         .collect();
     let line = Stroke::new(1.0, Color32::from_white_alpha(150));
@@ -1084,6 +1139,9 @@ pub fn mesh_warp_overlay(
     }
     let ctx = ui.ctx().clone();
     let accent = app.tokens.accent;
+    if let Some(r) = region {
+        mesh_region_handles(app, ui, painter, map, layer, g, fm, r, actions);
+    }
     for (k, s) in screen.iter().enumerate() {
         let hr = Rect::from_center_size(*s, vec2(10.0, 10.0));
         let id = egui::Id::new(("mesh-warp-vertex", g.uid, k));
@@ -1112,9 +1170,117 @@ pub fn mesh_warp_overlay(
     }
 }
 
+/// Mesh Warp's region box and its handles (`viewer.meshWarp.<uid>.region.<handle>`, see
+/// [`MESH_REGION_HANDLES`]). A drag writes both corners (normalised: top-left is the minimum)
+/// under one merge key, so it is one undo step.
+#[allow(clippy::too_many_arguments)]
+fn mesh_region_handles(
+    app: &mut EffectcraftApp,
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    map: &super::viewer::ViewerMap,
+    layer: &Layer,
+    g: &PropGroup,
+    fm: &Mat3,
+    r: [f64; 4],
+    actions: &mut Actions,
+) {
+    let [x0, y0, x1, y1] = r;
+    let to_screen = |q: [f64; 2]| map.to_screen(fw::layer_to_comp(fm, q));
+    let corners = [to_screen([x0, y0]), to_screen([x1, y0]), to_screen([x1, y1]), to_screen([x0, y1])];
+    let amber = Color32::from_rgb(0xff, 0xc0, 0x30);
+    let mut outline = corners.to_vec();
+    outline.push(corners[0]);
+    painter.add(egui::Shape::dashed_line(&outline, Stroke::new(1.0, amber), 6.0, 4.0));
+    let centre = pos2(corners.iter().map(|p| p.x).sum::<f32>() / 4.0, corners.iter().map(|p| p.y).sum::<f32>() / 4.0);
+    let mid = |a: Pos2, b: Pos2| pos2((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+    // Handles sit just outside the box so they never cover the mesh's own corner and edge
+    // vertices.
+    let out = |p: Pos2, by: f32, fallback: egui::Vec2| {
+        let d = p - centre;
+        let n = if d.length() > 1e-3 { d / d.length() } else { fallback };
+        p + n * by
+    };
+    let top = mid(corners[0], corners[1]);
+    let places = [
+        out(corners[0], 16.0, vec2(-0.7, -0.7)),
+        out(corners[1], 16.0, vec2(0.7, -0.7)),
+        out(corners[2], 16.0, vec2(0.7, 0.7)),
+        out(corners[3], 16.0, vec2(-0.7, 0.7)),
+        out(top, 14.0, vec2(0.0, -1.0)),
+        out(mid(corners[1], corners[2]), 14.0, vec2(1.0, 0.0)),
+        out(mid(corners[2], corners[3]), 14.0, vec2(0.0, 1.0)),
+        out(mid(corners[3], corners[0]), 14.0, vec2(-1.0, 0.0)),
+        out(top, 34.0, vec2(0.0, -1.0)),
+    ];
+    let ctx = ui.ctx().clone();
+    for ((name, label, sides), at) in MESH_REGION_HANDLES.iter().zip(places) {
+        let hr = Rect::from_center_size(at, vec2(12.0, 12.0));
+        let id = egui::Id::new(("mesh-warp-region", g.uid, *name));
+        let resp = ui.interact(hr, id, Sense::drag());
+        let hot = resp.hovered() || resp.dragged();
+        let col = if hot { Color32::WHITE } else { amber };
+        if *name == "move" {
+            painter.line_segment([top, at], Stroke::new(1.0, amber));
+            painter.circle_filled(at, 5.0, col);
+            painter.circle_stroke(at, 5.0, Stroke::new(1.0, Color32::BLACK));
+        } else {
+            let dot = Rect::from_center_size(at, vec2(6.0, 6.0));
+            painter.rect_filled(dot, 1.0, col);
+            painter.rect_stroke(dot, 1.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Outside);
+        }
+        app.auto.add(&format!("viewer.meshWarp.{}.region.{name}", g.uid), hr, label);
+        if hot {
+            let icon = match *name {
+                "top" | "bottom" => egui::CursorIcon::ResizeVertical,
+                "left" | "right" => egui::CursorIcon::ResizeHorizontal,
+                "tl" | "br" => egui::CursorIcon::ResizeNwSe,
+                "tr" | "bl" => egui::CursorIcon::ResizeNeSw,
+                _ => egui::CursorIcon::Move,
+            };
+            ctx.set_cursor_icon(icon);
+        }
+        // The drag is measured from where the button went down, against the box as it was
+        // then, so the handle stays under the pointer.
+        let start_key = id.with("start");
+        if resp.drag_started() {
+            ui.data_mut(|d| d.insert_temp(start_key, r));
+        }
+        if resp.dragged()
+            && let Some(pos) = resp.interact_pointer_pos()
+            && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+            && let Some(p1) = fw::comp_to_layer(fm, map.to_comp(pos))
+            && let Some(p0) = fw::comp_to_layer(fm, map.to_comp(origin))
+        {
+            let r0 = ui.data(|d| d.get_temp::<[f64; 4]>(start_key)).unwrap_or(r);
+            let n = moved_region(r0, *sides, [p1[0] - p0[0], p1[1] - p0[1]]);
+            if n != r {
+                let key = gesture_key(ui, id, resp.drag_started());
+                for (prop, v) in [("regionTopLeft", [n[0], n[1]]), ("regionBottomRight", [n[2], n[3]])] {
+                    if let Some(p) = g.get(prop) {
+                        actions.push(("prop.set".into(), json!({"layer": layer.id.0, "prop": p.uid, "value": v, "merge": key})));
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn region_handles_move_their_sides_and_keep_a_box() {
+        let r = [10.0, 20.0, 110.0, 70.0];
+        assert_eq!(moved_region(r, [true, true, false, false], [5.0, -3.0]), [15.0, 17.0, 110.0, 70.0]);
+        assert_eq!(moved_region(r, [false, false, true, false], [-4.0, 9.0]), [10.0, 20.0, 106.0, 70.0]);
+        assert_eq!(moved_region(r, [true; 4], [2.0, 3.0]), [12.0, 23.0, 112.0, 73.0]);
+        // Dragged past the opposite side: the box stays at least 1 px wide.
+        assert_eq!(moved_region(r, [true, false, false, false], [500.0, 0.0]), [109.0, 20.0, 110.0, 70.0]);
+        assert_eq!(moved_region(r, [false, false, false, true], [0.0, -500.0]), [10.0, 20.0, 110.0, 21.0]);
+        assert_eq!(moved_region(r, [true; 4], [f64::NAN, 1.0]), r);
+    }
 
     #[test]
     fn mesh_text_round_trips() {

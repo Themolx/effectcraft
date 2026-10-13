@@ -397,7 +397,8 @@ fn dst_displace(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // ---------------------------------------------------------------- Mesh Warp (distort2::grid_warp)
-// u[0] = (row starts offset, list offset). data: 12 floats per triangle (the barycentric
+// u[0] = (row starts offset, list offset, background: 0 none, 1 the original, 2 the original
+// outside the region f[0] = (x0, y0, x1, y1) in buffer pixels). data: 12 floats per triangle (the barycentric
 // coefficients k11 k12 k21 k22 relative to vertex c, c, then the source points a, b, c), then
 // per output row the start of its triangle list (height + 1 entries), then the lists (triangle
 // indices in the CPU's bucket order).
@@ -432,6 +433,23 @@ fn dst_mesh(@builtin(global_invocation_id) gid: vec3<u32>) {
         let sx = data[b + 6u] * l1 + data[b + 8u] * l2 + data[b + 10u] * l3;
         let sy = data[b + 7u] * l1 + data[b + 9u] * l2 + data[b + 11u] * l3;
         cur = sample_bilinear(src, sx, sy);
+    }
+    // Mesh Warp's background under the warped region (distort2::mesh_background_weight).
+    let mode = P.u[0].z;
+    if (mode != 0u) {
+        var k = 1.0;
+        if (mode == 2u) {
+            let r = P.f[0];
+            let fx = f32(p.x);
+            let fy = f32(p.y);
+            let cx = clamp(min(fx + 1.0, r.z) - max(fx, r.x), 0.0, 1.0);
+            let cy = clamp(min(fy + 1.0, r.w) - max(fy, r.y), 0.0, 1.0);
+            k = 1.0 - cx * cy;
+        }
+        let t = (1.0 - clamp(cur.w, 0.0, 1.0)) * k;
+        if (t > 0.0) {
+            cur = cur + textureLoad(src, p, 0) * t;
+        }
     }
     textureStore(out, p, cur);
 }

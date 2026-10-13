@@ -10,6 +10,11 @@
 //! `;`) separated `dx,dy` pairs, row-major over the (rows+1)×(columns+1) vertices, giving each
 //! vertex's offset in layer pixels. An empty string (or one with the wrong count) is the
 //! undistorted mesh.
+//!
+//! Beyond After Effects (modelled on Nuke's GridWarp), Mesh Warp's rest grid spans a region,
+//! `regionTopLeft`…`regionBottomRight` (layer pixels, the whole layer by default). Outside it
+//! the layer is untouched; the warped region is laid over the original, which shows where the
+//! mesh pulls away when "Original as Background" is on (see [`MeshBackground`]).
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
@@ -467,18 +472,79 @@ pub fn parse_mesh(s: &str) -> Vec<(f64, f64)> {
         .collect()
 }
 
-fn mesh_warp(ctx: &EffectCtx, mut b: Buf) -> Buf {
-    let rows = ctx.params.f("rows").round().clamp(1.0, 31.0) as usize;
-    let cols = ctx.params.f("columns").round().clamp(1.0, 31.0) as usize;
-    let q = ctx.params.f("quality").round().clamp(1.0, 10.0) as usize;
+/// Largest |coordinate| (layer pixels) of a Mesh Warp region corner; farther ones are clamped.
+const MESH_REGION_LIMIT: f64 = 1.0e6;
+
+/// Mesh Warp's region (`regionTopLeft`, `regionBottomRight`, layer pixels) as `[x0, y0, x1, y1]`:
+/// corners in either order, clamped to ±[`MESH_REGION_LIMIT`]. A missing, non-finite or
+/// degenerate (under 1 px wide or tall) region is the whole layer, as are projects saved before
+/// the region existed.
+pub fn mesh_region(top_left: Option<[f64; 2]>, bottom_right: Option<[f64; 2]>, layer_size: [f64; 2]) -> [f64; 4] {
+    let full = [0.0, 0.0, layer_size[0], layer_size[1]];
+    let (Some(a), Some(b)) = (top_left, bottom_right) else { return full };
+    if !a.iter().chain(b.iter()).all(|v| v.is_finite()) {
+        return full;
+    }
+    let c = |v: f64| v.clamp(-MESH_REGION_LIMIT, MESH_REGION_LIMIT);
+    let (x0, x1) = (c(a[0].min(b[0])), c(a[0].max(b[0])));
+    let (y0, y1) = (c(a[1].min(b[1])), c(a[1].max(b[1])));
+    if x1 - x0 < 1.0 || y1 - y0 < 1.0 {
+        return full;
+    }
+    [x0, y0, x1, y1]
+}
+
+/// What Mesh Warp shows under the warped region.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MeshBackground {
+    /// Nothing: pixels the mesh doesn't cover are transparent (After Effects; a whole-layer
+    /// region with Original as Background off).
+    None,
+    /// The original layer everywhere (Original as Background on).
+    Original,
+    /// The original outside the region only (`[x0, y0, x1, y1]` in buffer pixels, edge pixels
+    /// by their coverage): inside it, pixels the mesh doesn't cover are transparent.
+    OutsideRegion([f64; 4]),
+}
+
+/// Mesh Warp's grid in buffer pixels: the (nx+1)×(ny+1) destination and source points and the
+/// background (the GPU rasterises the same grid).
+pub struct MeshPlan {
+    pub nx: usize,
+    pub ny: usize,
+    pub dest: Vec<Pt>,
+    pub srcp: Vec<Pt>,
+    pub background: MeshBackground,
+}
+
+/// Mesh Warp's grid for buffer `offset`/`scale`; `None` = the undistorted mesh (the layer is
+/// unchanged).
+///
+/// The mesh's rest grid spans the region (the whole layer by default): vertex (i, j) rests at
+/// `region.min + (i/columns, j/rows) * region.size`, plus its offset from `mesh`. The warped
+/// region is laid over the background (see [`MeshBackground`]), like Nuke's GridWarp.
+pub fn mesh_plan(ctx: &EffectCtx, offset: [f64; 2], scale: f64) -> Option<MeshPlan> {
+    let to_px = |p: [f64; 2]| (p[0] * scale + offset[0], p[1] * scale + offset[1]);
+    let n = |id: &str| {
+        let v = ctx.params.f(id);
+        if v.is_finite() { v.round() } else { 1.0 }
+    };
+    let rows = n("rows").clamp(1.0, 31.0) as usize;
+    let cols = n("columns").clamp(1.0, 31.0) as usize;
+    let q = n("quality").clamp(1.0, 10.0) as usize;
     let offs = parse_mesh(ctx.params.s("mesh"));
     if offs.len() != (rows + 1) * (cols + 1) || offs.iter().all(|o| o.0 == 0.0 && o.1 == 0.0) {
-        return b;
+        return None;
     }
     let (lw, lh) = (ctx.layer_size[0], ctx.layer_size[1]);
+    let corner = |id: &str| ctx.params.values.get(id).map(Value::as_vec2);
+    let [x0, y0, x1, y1] = mesh_region(corner("regionTopLeft"), corner("regionBottomRight"), [lw, lh]);
+    let (rw, rh) = (x1 - x0, y1 - y0);
     let vert = |i: usize, j: usize| {
-        let o = offs[j * (cols + 1) + i];
-        b.to_px([i as f64 / cols as f64 * lw + o.0, j as f64 / rows as f64 * lh + o.1])
+        let o = offs.get(j * (cols + 1) + i).copied().unwrap_or((0.0, 0.0));
+        // Non-finite offsets would poison the triangle bounds: treat them as no offset.
+        let o = if o.0.is_finite() && o.1.is_finite() { o } else { (0.0, 0.0) };
+        to_px([x0 + i as f64 / cols as f64 * rw + o.0, y0 + j as f64 / rows as f64 * rh + o.1])
     };
     let (nx, ny) = (cols * q, rows * q);
     let mut dest = Vec::with_capacity((nx + 1) * (ny + 1));
@@ -491,10 +557,56 @@ fn mesh_warp(ctx: &EffectCtx, mut b: Buf) -> Buf {
             let x = (p00.0 * (1.0 - u) + p10.0 * u) * (1.0 - v) + (p01.0 * (1.0 - u) + p11.0 * u) * v;
             let y = (p00.1 * (1.0 - u) + p10.1 * u) * (1.0 - v) + (p01.1 * (1.0 - u) + p11.1 * u) * v;
             dest.push((x, y));
-            srcp.push(b.to_px([gi as f64 / nx as f64 * lw, gj as f64 / ny as f64 * lh]));
+            srcp.push(to_px([x0 + gi as f64 / nx as f64 * rw, y0 + gj as f64 / ny as f64 * rh]));
         }
     }
-    b.img = grid_warp(&b.img, b.img.width, b.img.height, nx, ny, &dest, &srcp);
+    let whole_layer = x0 <= 0.0 && y0 <= 0.0 && x1 >= lw && y1 >= lh;
+    let background = if ctx.params.b("originalAsBackground") {
+        MeshBackground::Original
+    } else if whole_layer {
+        MeshBackground::None
+    } else {
+        let (a, b) = (to_px([x0, y0]), to_px([x1, y1]));
+        MeshBackground::OutsideRegion([a.0, a.1, b.0, b.1])
+    };
+    Some(MeshPlan { nx, ny, dest, srcp, background })
+}
+
+/// How much of the original shows under a pixel the mesh leaves uncovered (0…1): the share of
+/// pixel (x, y) outside `region` for [`MeshBackground::OutsideRegion`].
+pub fn mesh_background_weight(bg: MeshBackground, x: usize, y: usize) -> f32 {
+    match bg {
+        MeshBackground::None => 0.0,
+        MeshBackground::Original => 1.0,
+        MeshBackground::OutsideRegion([x0, y0, x1, y1]) => {
+            let (px, py) = (x as f64, y as f64);
+            let cx = ((px + 1.0).min(x1) - px.max(x0)).clamp(0.0, 1.0);
+            let cy = ((py + 1.0).min(y1) - py.max(y0)).clamp(0.0, 1.0);
+            (1.0 - cx * cy) as f32
+        }
+    }
+}
+
+fn mesh_warp(ctx: &EffectCtx, mut b: Buf) -> Buf {
+    let Some(plan) = mesh_plan(ctx, b.offset, b.scale) else { return b };
+    let mut out = grid_warp(&b.img, b.img.width, b.img.height, plan.nx, plan.ny, &plan.dest, &plan.srcp);
+    if plan.background != MeshBackground::None {
+        // The warped region over the (original) background, premultiplied.
+        let w = b.img.width.max(1) as usize;
+        let orig = &b.img;
+        out.rows_mut().for_each(|(y, row)| {
+            for (x, px) in row.iter_mut().enumerate() {
+                let Some(o) = orig.data.get(y * w + x) else { continue };
+                let k = (1.0 - px[3].clamp(0.0, 1.0)) * mesh_background_weight(plan.background, x, y);
+                if k > 0.0 {
+                    for (v, ov) in px.iter_mut().zip(o) {
+                        *v += ov * k;
+                    }
+                }
+            }
+        });
+    }
+    b.img = out;
     b
 }
 
@@ -799,6 +911,11 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("columns", "Columns", num(7.0), slider(1.0, 31.0, 1.0, 31.0, 0)),
                 p("quality", "Quality", num(8.0), slider(1.0, 10.0, 1.0, 10.0, 0)),
                 p("mesh", "Distortion Mesh", Value::Str(String::new()), ParamUi::Hidden),
+                // Beyond After Effects (Nuke's GridWarp): the mesh spans this region only, and
+                // the warped region is laid over the original.
+                p("regionTopLeft", "Region Top Left", pt(0.0, 0.0), ParamUi::Point),
+                p("regionBottomRight", "Region Bottom Right", pt(1.0, 1.0), ParamUi::Point),
+                p("originalAsBackground", "Original as Background", Value::Bool(false), ParamUi::Checkbox),
             ],
             mesh_warp,
         ),
@@ -957,6 +1074,171 @@ mod tests {
             }
         }
         assert!(o.img.get(1, 10)[3] < 1e-6);
+    }
+
+    /// Mesh Warp as it rendered before the region existed (the whole-layer grid, nothing under
+    /// it), for the bit-identity test.
+    fn legacy_mesh_warp(rows: usize, cols: usize, q: usize, offs: &[(f64, f64)], ls: [f64; 2], b: &Buf) -> Image {
+        let (lw, lh) = (ls[0], ls[1]);
+        let vert = |i: usize, j: usize| {
+            let o = offs[j * (cols + 1) + i];
+            b.to_px([i as f64 / cols as f64 * lw + o.0, j as f64 / rows as f64 * lh + o.1])
+        };
+        let (nx, ny) = (cols * q, rows * q);
+        let (mut dest, mut srcp) = (vec![], vec![]);
+        for gj in 0..=ny {
+            for gi in 0..=nx {
+                let (ci, cj) = ((gi / q).min(cols - 1), (gj / q).min(rows - 1));
+                let (u, v) = ((gi - ci * q) as f64 / q as f64, (gj - cj * q) as f64 / q as f64);
+                let (p00, p10, p01, p11) = (vert(ci, cj), vert(ci + 1, cj), vert(ci, cj + 1), vert(ci + 1, cj + 1));
+                let x = (p00.0 * (1.0 - u) + p10.0 * u) * (1.0 - v) + (p01.0 * (1.0 - u) + p11.0 * u) * v;
+                let y = (p00.1 * (1.0 - u) + p10.1 * u) * (1.0 - v) + (p01.1 * (1.0 - u) + p11.1 * u) * v;
+                dest.push((x, y));
+                srcp.push(b.to_px([gi as f64 / nx as f64 * lw, gj as f64 / ny as f64 * lh]));
+            }
+        }
+        grid_warp(&b.img, b.img.width, b.img.height, nx, ny, &dest, &srcp)
+    }
+
+    fn mesh_text(offs: &[(f64, f64)]) -> Value {
+        Value::Str(offs.iter().map(|o| format!("{},{}", o.0, o.1)).collect::<Vec<_>>().join(" "))
+    }
+
+    /// A 2 × 3 mesh with every vertex moved (edges pulled in and out).
+    fn wobbly_mesh() -> Vec<(f64, f64)> {
+        (0..12).map(|k| (((k * 7) % 5) as f64 - 2.0 + 0.25, ((k * 3) % 4) as f64 - 1.5)).collect()
+    }
+
+    #[test]
+    fn mesh_warp_whole_layer_region_is_bit_identical_to_before() {
+        let offs = wobbly_mesh();
+        let set = [("rows", num(2.0)), ("columns", num(3.0)), ("quality", num(4.0)), ("mesh", mesh_text(&offs))];
+        let img = test_img(32, 24);
+        // Defaults: the region is the whole layer and Original as Background is off.
+        let o = run("ec.distort.meshwarp", &set, img.clone());
+        let want = legacy_mesh_warp(2, 3, 4, &offs, [32.0, 24.0], &Buf { img: img.clone(), offset: [0.0, 0.0], scale: 1.0 });
+        assert!(o.img.data.iter().any(|p| p[3] == 0.0), "edges pulled in leave transparency, as in After Effects");
+        assert_eq!(o.img, want);
+        // A padded, half-resolution buffer (effect space ≠ buffer pixels) too.
+        let s = crate::find("ec.distort.meshwarp").unwrap();
+        let ls = [40.0, 30.0];
+        let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), crate::default_value(p, ls))).collect() };
+        for (k, v) in &set {
+            params.values.insert(k.to_string(), v.clone());
+        }
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: ls, seed: 1, adjustment: false, env: Default::default() };
+        let buf = Buf { img: test_img(26, 21), offset: [3.0, 2.5], scale: 0.5 };
+        let want = legacy_mesh_warp(2, 3, 4, &offs, ls, &buf);
+        assert_eq!(crate::apply(s, &ctx, buf).img, want);
+        // An old project without the region parameters renders the same.
+        params.values.retain(|k, _| !k.starts_with("region") && k != "originalAsBackground");
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: ls, seed: 1, adjustment: false, env: Default::default() };
+        let buf = Buf { img: test_img(26, 21), offset: [3.0, 2.5], scale: 0.5 };
+        assert_eq!(crate::apply(s, &ctx, buf).img, want);
+    }
+
+    /// A 2 × 2 mesh over the region (8, 6)–(24, 18) of a 32 × 24 layer, its middle vertex moved
+    /// (the border stays put) and its top-middle vertex pulled down by `pull`.
+    fn region_case(pull: f64, background: bool) -> (Image, Image) {
+        let img = test_img(32, 24);
+        let mut offs = vec![(0.0, 0.0); 9];
+        offs[4] = (2.5, 1.5);
+        offs[1] = (0.0, pull);
+        let o = run(
+            "ec.distort.meshwarp",
+            &[
+                ("rows", num(2.0)),
+                ("columns", num(2.0)),
+                ("mesh", mesh_text(&offs)),
+                ("regionTopLeft", pt(8.0, 6.0)),
+                ("regionBottomRight", pt(24.0, 18.0)),
+                ("originalAsBackground", Value::Bool(background)),
+            ],
+            img.clone(),
+        );
+        (o.img, img)
+    }
+
+    #[test]
+    fn mesh_warp_region_leaves_the_outside_unchanged() {
+        for background in [false, true] {
+            let (o, img) = region_case(0.0, background);
+            let mut inside_changed = false;
+            for y in 0..24 {
+                for x in 0..32 {
+                    let inside = (8..24).contains(&x) && (6..18).contains(&y);
+                    if !inside {
+                        assert_eq!(o.get(x, y), img.get(x, y), "({x},{y}) background {background}");
+                    } else {
+                        inside_changed |= o.get(x, y) != img.get(x, y);
+                    }
+                }
+            }
+            assert!(inside_changed, "the region is warped");
+        }
+    }
+
+    #[test]
+    fn mesh_warp_region_pulled_edge_shows_the_original_or_transparency() {
+        // The top-middle vertex pulled 4 px down: just under the region's top edge, the mesh no
+        // longer covers the pixel.
+        let (on, img) = region_case(4.0, true);
+        assert_eq!(on.get(16, 6), img.get(16, 6), "Original as Background: never a hole");
+        let (off, _) = region_case(4.0, false);
+        assert_eq!(off.get(16, 6)[3], 0.0, "without the background the uncovered part is transparent");
+        // Outside the region the original stays either way.
+        assert_eq!(off.get(16, 4), img.get(16, 4));
+        // Pulled outward (up), the warped region covers the original above it.
+        let (out, _) = region_case(-4.0, false);
+        assert_ne!(out.get(16, 4), img.get(16, 4));
+        assert!(out.get(16, 4)[3] > 0.99);
+    }
+
+    #[test]
+    fn mesh_warp_whole_layer_with_background_fills_the_holes() {
+        let offs = wobbly_mesh();
+        let img = test_img(32, 24);
+        let set = |bg: bool| [("rows", num(2.0)), ("columns", num(3.0)), ("mesh", mesh_text(&offs)), ("originalAsBackground", Value::Bool(bg))];
+        let off = run("ec.distort.meshwarp", &set(false), img.clone()).img;
+        let on = run("ec.distort.meshwarp", &set(true), img.clone()).img;
+        assert!(on.data.iter().all(|p| p[3] > 0.999));
+        for (k, (a, b2)) in off.data.iter().zip(&on.data).enumerate() {
+            if a[3] >= 1.0 {
+                assert_eq!(a, b2, "pixel {k}: the warp covers the background");
+            }
+        }
+    }
+
+    #[test]
+    fn mesh_warp_bad_regions_fall_back_without_crashing() {
+        let offs = wobbly_mesh();
+        let img = test_img(32, 24);
+        let base = [("rows", num(2.0)), ("columns", num(3.0)), ("mesh", mesh_text(&offs))];
+        let with = |tl: [f64; 2], br: [f64; 2]| {
+            let mut v: Vec<(&str, Value)> = base.to_vec();
+            v.push(("regionTopLeft", Value::Vec2(tl)));
+            v.push(("regionBottomRight", Value::Vec2(br)));
+            run("ec.distort.meshwarp", &v, img.clone()).img
+        };
+        let whole = run("ec.distort.meshwarp", &base, img.clone()).img;
+        // Degenerate (a point, a line) and non-finite regions: the whole layer.
+        assert_eq!(with([10.0, 10.0], [10.0, 10.0]), whole);
+        assert_eq!(with([4.0, 10.0], [28.0, 10.5]), whole);
+        assert_eq!(with([f64::NAN, 0.0], [32.0, 24.0]), whole);
+        assert_eq!(with([0.0, 0.0], [f64::INFINITY, 24.0]), whole);
+        // Inverted corners are the same rectangle.
+        assert_eq!(with([24.0, 18.0], [8.0, 6.0]), with([8.0, 6.0], [24.0, 18.0]));
+        // Huge regions are clamped, and render.
+        let o = with([-1e300, -1e300], [1e300, 1e300]);
+        assert_eq!((o.width, o.height), (32, 24));
+        // Bad grid sizes and offsets don't crash either.
+        let o = run(
+            "ec.distort.meshwarp",
+            &[("rows", num(f64::NAN)), ("columns", num(f64::NAN)), ("mesh", Value::Str("NaN,inf inf,1 1,1 1,1".into()))],
+            img.clone(),
+        );
+        assert_eq!((o.img.width, o.img.height), (32, 24));
+        assert_eq!(mesh_region(None, Some([1.0, 1.0]), [5.0, 6.0]), [0.0, 0.0, 5.0, 6.0]);
     }
 
     #[test]

@@ -102,6 +102,23 @@ fn mesh_warp() {
     effect_case("ec.distort.meshwarp", &[("rows", n(2.0)), ("columns", n(3.0)), ("quality", n(3.0)), ("mesh", Value::Str(mesh.into()))]);
     let mesh = "-4,-3 2,0 8,5 0,-2 9,9 1,0 -3,4 2,2 4,-6";
     effect_case("ec.distort.meshwarp", &[("rows", n(2.0)), ("columns", n(2.0)), ("quality", n(5.0)), ("mesh", Value::Str(mesh.into()))]);
+    // A region (Nuke's GridWarp), over the original or not, and the whole layer over the original.
+    let mesh = "0,0 0,5 0,0 3,-2 4,3 -6,0 0,0 0,-7 0,0";
+    let region = |bg: bool| {
+        [
+            ("rows", n(2.0)),
+            ("columns", n(2.0)),
+            ("quality", n(4.0)),
+            ("mesh", Value::Str(mesh.into())),
+            ("regionTopLeft", Value::Vec2([12.5, 8.0])),
+            ("regionBottomRight", Value::Vec2([51.0, 35.25])),
+            ("originalAsBackground", Value::Bool(bg)),
+        ]
+    };
+    effect_case("ec.distort.meshwarp", &region(false));
+    effect_case("ec.distort.meshwarp", &region(true));
+    let mesh = "-4,-3 2,0 8,5 0,-2 9,9 1,0 -3,4 2,2 4,-6";
+    effect_case("ec.distort.meshwarp", &[("rows", n(2.0)), ("columns", n(2.0)), ("mesh", Value::Str(mesh.into())), ("originalAsBackground", on())]);
 }
 
 #[test]

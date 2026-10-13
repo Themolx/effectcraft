@@ -268,38 +268,27 @@ fn displacement_map(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
 }
 
 fn mesh_warp(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
-    let rows = ctx.params.f("rows").round().clamp(1.0, 31.0) as usize;
-    let cols = ctx.params.f("columns").round().clamp(1.0, 31.0) as usize;
-    let q = ctx.params.f("quality").round().clamp(1.0, 10.0) as usize;
-    let offs = effectcraft_effects::parse_mesh(ctx.params.s("mesh"));
-    if offs.len() != (rows + 1) * (cols + 1) || offs.iter().all(|o| o.0 == 0.0 && o.1 == 0.0) {
-        return Some(b);
-    }
-    let (lw, lh) = (ctx.layer_size[0], ctx.layer_size[1]);
-    let vert = |i: usize, j: usize| {
-        let o = offs[j * (cols + 1) + i];
-        b.to_px([i as f64 / cols as f64 * lw + o.0, j as f64 / rows as f64 * lh + o.1])
-    };
-    let (nx, ny) = (cols * q, rows * q);
-    let mut dest = Vec::with_capacity((nx + 1) * (ny + 1));
-    let mut srcp = Vec::with_capacity((nx + 1) * (ny + 1));
-    for gj in 0..=ny {
-        for gi in 0..=nx {
-            let (ci, cj) = ((gi / q).min(cols - 1), (gj / q).min(rows - 1));
-            let (u, v) = ((gi - ci * q) as f64 / q as f64, (gj - cj * q) as f64 / q as f64);
-            let (p00, p10, p01, p11) = (vert(ci, cj), vert(ci + 1, cj), vert(ci, cj + 1), vert(ci + 1, cj + 1));
-            let x = (p00.0 * (1.0 - u) + p10.0 * u) * (1.0 - v) + (p01.0 * (1.0 - u) + p11.0 * u) * v;
-            let y = (p00.1 * (1.0 - u) + p10.1 * u) * (1.0 - v) + (p01.1 * (1.0 - u) + p11.1 * u) * v;
-            dest.push((x, y));
-            srcp.push(b.to_px([gi as f64 / nx as f64 * lw, gj as f64 / ny as f64 * lh]));
-        }
-    }
-    grid_warp(e, b, nx, ny, &dest, &srcp)
+    let Some(plan) = effectcraft_effects::mesh_plan(ctx, b.offset, b.scale) else { return Some(b) };
+    grid_warp_over(e, b, plan.nx, plan.ny, &plan.dest, &plan.srcp, plan.background)
 }
 
 /// distort2::grid_warp: grid point `i` of the (nx+1)×(ny+1) grid at `dest[i]` shows the source at
 /// `srcp[i]` (Mesh Warp, Bezier Warp). Triangles in order, bucketed per output row.
 pub(crate) fn grid_warp(e: &mut Enc, b: GBuf, nx: usize, ny: usize, dest: &[(f64, f64)], srcp: &[(f64, f64)]) -> Option<GBuf> {
+    grid_warp_over(e, b, nx, ny, dest, srcp, effectcraft_effects::MeshBackground::None)
+}
+
+/// [`grid_warp`] laid over Mesh Warp's background (distort2::mesh_warp): u[0].z = 0 none, 1 the
+/// original, 2 the original outside the region f[0] = (x0, y0, x1, y1) in buffer pixels.
+fn grid_warp_over(
+    e: &mut Enc,
+    b: GBuf,
+    nx: usize,
+    ny: usize,
+    dest: &[(f64, f64)],
+    srcp: &[(f64, f64)],
+    bg: effectcraft_effects::MeshBackground,
+) -> Option<GBuf> {
     let idx = |i: usize, j: usize| j * (nx + 1) + i;
     let hh = b.img.height as usize;
     let mut tri_data: Vec<f32> = Vec::with_capacity(nx * ny * 24);
@@ -351,7 +340,13 @@ pub(crate) fn grid_warp(e: &mut Enc, b: GBuf, nx: usize, ny: usize, dest: &[(f64
         data.extend(bucket.iter().map(|&t| t as f32));
     }
     let mut p = Params::default();
-    p.u[0] = [row_starts as u32, list_start as u32, 0, 0];
+    let (mode, rect) = match bg {
+        effectcraft_effects::MeshBackground::None => (0, [0.0; 4]),
+        effectcraft_effects::MeshBackground::Original => (1, [0.0; 4]),
+        effectcraft_effects::MeshBackground::OutsideRegion(r) => (2, r.map(|v| v as f32)),
+    };
+    p.u[0] = [row_starts as u32, list_start as u32, mode, 0];
+    p.f[0] = rect;
     let buf = e.data(&data);
     run(e, "dst_mesh", &p, b, Some(&buf))
 }

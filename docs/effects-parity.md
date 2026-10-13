@@ -1,6 +1,6 @@
 # Effects parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-10 · **Change:** major (first effects parity checklist: presence, GPU, fidelity and presets against After Effects 2026 26.5) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-12 · **Change:** minor (Mesh Warp region, beyond After Effects) · **Target:** Adobe After Effects 2026
 
 Effects are the deepest single area of After Effects. This page separates the four questions
 that a single "306 of 306" hides: does each effect exist, does it run fast, does it look like
@@ -51,6 +51,21 @@ corpus compares renders, each effect is assumed to differ somewhere, and users k
 Third-party bundles in After Effects (Cineware, Mocha AE) are out of scope; Keylight is
 implemented under a generic name ("Key Light").
 
+## Beyond After Effects
+
+- **Mesh Warp region** (modelled on Nuke's GridWarp). After Effects' Mesh Warp grid always spans
+  the whole layer. EffectCraft's has a region, *Region Top Left* / *Region Bottom Right* (points
+  in layer pixels; the whole layer by default, so existing projects render exactly as before):
+  the mesh's rest grid spans only that rectangle, and the warped region is laid over the
+  untouched layer. Content stretched past the region covers the original; where the mesh pulls
+  away from part of the region, *Original as Background* (off by default, as in After Effects)
+  shows the original there instead of a transparent hole. With the box smaller than the layer,
+  everything outside it is the original either way. On the Composition viewer the region is a
+  dashed box with corner, edge and move handles just outside it (automation ids
+  `viewer.meshWarp.<effect uid>.region.{tl,tr,br,bl,top,right,bottom,left,move}`); redrawing it
+  carries the grid along, with the vertex offsets relative to it. A degenerate or non-finite
+  region renders as the whole layer.
+
 ## Estimate
 
 **≈ 70–130 h**: a fidelity corpus case per effect at default and one non-default setting, compared
@@ -65,3 +80,4 @@ the GPU is performance, not parity.
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-10 | major | First effects parity checklist |
+| 2026-10-12 | minor | Mesh Warp region and Original as Background (beyond After Effects) |

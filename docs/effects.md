@@ -3,7 +3,7 @@
 <!-- Generated from the effect registry (crates/effects/src/catalog.rs); do not edit by hand.
      Regenerate: UPDATE_DOCS=1 cargo test -p effectcraft-effects --lib effects_doc_is_current -->
 
-EffectCraft ships 306 effects with 3017 parameters in total, grouped into the same categories as the Effects & Presets panel. Every effect is our own implementation, written from public behaviour descriptions and standard image-processing literature. Parameter names, order, popup options, units, defaults and ranges follow the reference application so that projects, expressions and muscle memory carry over.
+EffectCraft ships 306 effects with 3020 parameters in total, grouped into the same categories as the Effects & Presets panel. Every effect is our own implementation, written from public behaviour descriptions and standard image-processing literature. Parameter names, order, popup options, units, defaults and ranges follow the reference application so that projects, expressions and muscle memory carry over.
 
 - **GPU**: 280 effects also run on the GPU compositor with identical results.
 - **32**: 306 effects process 32-bit float (HDR, overbright) pixels without clamping.
@@ -151,7 +151,7 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | Displacement Map | `ec.distort.displacementmap` | 8 | GPU | 32 | Implemented |
 | Liquify | `ec.distort.liquify` | 12 | GPU | 32 | Implemented |
 | Magnify | `ec.distort.magnify` | 10 | GPU | 32 | Implemented |
-| Mesh Warp | `ec.distort.meshwarp` | 3 | GPU | 32 | Implemented |
+| Mesh Warp | `ec.distort.meshwarp` | 6 | GPU | 32 | Implemented |
 | Mirror | `ec.distort.mirror` | 2 | GPU | 32 | Implemented |
 | Offset | `ec.distort.offset` | 2 | GPU | 32 | Implemented |
 | Optics Compensation | `ec.distort.opticscompensation` | 6 | GPU | 32 | Implemented |

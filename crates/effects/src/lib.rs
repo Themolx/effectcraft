@@ -77,7 +77,7 @@ pub use color_fx::{
 pub use color2::{Curve, auto_correct_settings, color_link_mode, color_link_sample, equalize_tables, luma_clip_points, shadow_highlight_amounts};
 pub use color3::OffsetCurve;
 pub use distort::transform_shutter;
-pub use distort2::{MAGNIFY_MODES, bezier_grid, parse_mesh};
+pub use distort2::{MAGNIFY_MODES, MeshBackground, MeshPlan, bezier_grid, mesh_background_weight, mesh_plan, mesh_region, parse_mesh};
 pub use distort3::{RESHAPE_POINTS, ReshapeSetup, SmearSetup, cc_smear_pad, reshape_setup, smear_setup, warp_inverse_map};
 pub use distort4::liquify_mesh;
 use effectcraft_keyframe::Value;

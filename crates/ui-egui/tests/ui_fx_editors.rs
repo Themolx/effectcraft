@@ -280,6 +280,60 @@ fn mesh_warp_vertices_drag_on_the_viewer() {
     assert!((moved.x - mid.x - 40.0).abs() < 2.0, "the handle follows the vertex: {mid:?} → {moved:?}");
 }
 
+/// Mesh Warp's region (like Nuke's GridWarp): dragging its corner handle redraws the box (one
+/// undo step) and the grid follows; the move handle shifts the box with the mesh offsets
+/// kept relative to it.
+#[test]
+fn mesh_warp_region_handles_drag_on_the_viewer() {
+    let (mut s0, l, fx) = with_effect("Mesh Warp");
+    let g = s0.active_comp().unwrap().layer(LayerId(l)).unwrap().props.find_group(fx).unwrap().clone();
+    s0.execute("prop.set", json!({"layer": l, "prop": g.get("rows").unwrap().uid, "value": 2})).unwrap();
+    s0.execute("prop.set", json!({"layer": l, "prop": g.get("columns").unwrap().uid, "value": 2})).unwrap();
+    let mut h = harness(s0);
+    h.state_mut().toggle_maximize(PanelKind::EffectControls);
+    h.state_mut().session.state.selected_props = vec![(LayerId(l), fx)];
+    for _ in 0..6 {
+        h.step();
+    }
+    let v2 = |h: &Harness<'_, EffectcraftApp>, id: &str| value(h, l, fx, id).as_vec2();
+    assert_eq!(v2(&h, "regionTopLeft"), [0.0, 0.0]);
+    assert_eq!(v2(&h, "regionBottomRight"), [320.0, 180.0]);
+    let v = |r: usize, c: usize| format!("viewer.meshWarp.{fx}.{r}.{c}");
+    let reg = |n: &str| format!("viewer.meshWarp.{fx}.region.{n}");
+    for n in ["tl", "tr", "br", "bl", "top", "right", "bottom", "left", "move"] {
+        rect(&h, &reg(n));
+    }
+    // The region corners don't also get the generic effect-point crosshairs.
+    for id in ["regionTopLeft", "regionBottomRight"] {
+        let uid = g.get(id).unwrap().uid;
+        assert!(!h.state().auto.elements.iter().any(|e| e.id == format!("viewer.effectPoint.{uid}")), "{id}");
+    }
+    let (tl, br) = (rect(&h, &v(0, 0)).center(), rect(&h, &v(2, 2)).center());
+    let zoom = (br.x - tl.x) / 320.0;
+    let undo_len = h.state().session.history.undo.len();
+    let c = rect(&h, &reg("br")).center();
+    drag(&mut h, c, c - egui::vec2(160.0 * zoom, 90.0 * zoom));
+    let b = v2(&h, "regionBottomRight");
+    assert!((b[0] - 160.0).abs() < 1.5 && (b[1] - 90.0).abs() < 1.5, "the corner follows the pointer: {b:?}");
+    assert_eq!(v2(&h, "regionTopLeft"), [0.0, 0.0]);
+    assert_eq!(h.state().session.history.undo.len(), undo_len + 1, "one undo step");
+    let br2 = rect(&h, &v(2, 2)).center();
+    assert!((br2.x - (tl.x + 160.0 * zoom)).abs() < 2.0 && (br2.y - (tl.y + 90.0 * zoom)).abs() < 2.0, "the grid follows the box: {br2:?}");
+    // Warp the centre vertex, then move the box: the vertex keeps its offset.
+    let mid = rect(&h, &v(1, 1)).center();
+    drag(&mut h, mid, mid + egui::vec2(10.0 * zoom, 0.0));
+    let mesh = effectcraft_engine::effects::parse_mesh(&s(value(&h, l, fx, "mesh")));
+    let off = mesh[4];
+    assert!(off.0 > 5.0, "{mesh:?}");
+    let m = rect(&h, &reg("move")).center();
+    drag(&mut h, m, m + egui::vec2(50.0 * zoom, 40.0 * zoom));
+    let (a, b) = (v2(&h, "regionTopLeft"), v2(&h, "regionBottomRight"));
+    assert!((a[0] - 50.0).abs() < 1.5 && (a[1] - 40.0).abs() < 1.5 && (b[0] - 210.0).abs() < 1.5 && (b[1] - 130.0).abs() < 1.5, "{a:?} {b:?}");
+    assert_eq!(effectcraft_engine::effects::parse_mesh(&s(value(&h, l, fx, "mesh")))[4], off);
+    undo(&mut h);
+    assert!((v2(&h, "regionTopLeft")[0]).abs() < 1e-9, "undoing the move restores the box in one step");
+}
+
 /// UI fixes of M13.10: the Composition / Timeline tabs' close button, swatch and lock; the
 /// Preview panel scrolls in the default workspace (where it shows just the transport).
 #[test]
